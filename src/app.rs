@@ -4,7 +4,8 @@ use std::{
 };
 
 use crate::markdown::{
-    heading_block_colors, line_row_span, markdown_to_render, HeadingOverlay, RenderedMarkdown,
+    heading_block_colors, line_row_span, markdown_to_render, CodeBlockOverlay, HeadingOverlay,
+    RenderedMarkdown, CODE_BLOCK_BG,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -18,6 +19,7 @@ pub struct App {
     path: PathBuf,
     content: Vec<Line<'static>>,
     headings: Vec<HeadingOverlay>,
+    code_blocks: Vec<CodeBlockOverlay>,
     scroll: usize,
     viewport_height: u16,
     viewport_width: u16,
@@ -36,6 +38,7 @@ impl App {
         Self {
             path,
             headings: render.headings,
+            code_blocks: render.code_blocks,
             content: ensure_non_empty(render.lines),
             scroll: 0,
             viewport_height: 0,
@@ -50,6 +53,7 @@ impl App {
         let render = markdown_to_render(&markdown);
         self.content = ensure_non_empty(render.lines);
         self.headings = render.headings;
+        self.code_blocks = render.code_blocks;
         self.scroll = 0;
         Ok(())
     }
@@ -68,6 +72,7 @@ impl App {
         let inner = viewer_block.inner(viewport);
         self.viewport_height = inner.height.max(1);
         self.viewport_width = inner.width.max(1);
+        let metrics = self.compute_line_metrics(self.viewport_width.max(1) as usize);
 
         let paragraph = Paragraph::new(self.content.clone())
             .wrap(Wrap { trim: false })
@@ -75,7 +80,8 @@ impl App {
             .block(viewer_block);
         frame.render_widget(paragraph, viewport);
 
-        self.highlight_headings(frame, inner);
+        self.highlight_headings(frame, inner, &metrics);
+        self.render_code_blocks(frame, inner, &metrics);
 
         let status = Paragraph::new(self.status_line()).wrap(Wrap { trim: true });
         frame.render_widget(status, layout[1]);
@@ -140,57 +146,101 @@ impl App {
             .sum()
     }
 
-    fn highlight_headings(&self, frame: &mut Frame<'_>, inner: Rect) {
+    fn compute_line_metrics(&self, width: usize) -> LineMetrics {
+        let mut offsets = Vec::with_capacity(self.content.len() + 1);
+        offsets.push(0);
+        let mut total = 0usize;
+        for line in &self.content {
+            total += line_row_span(line, width) as usize;
+            offsets.push(total);
+        }
+        LineMetrics { offsets }
+    }
+
+    fn highlight_headings(&self, frame: &mut Frame<'_>, inner: Rect, metrics: &LineMetrics) {
         if inner.height == 0 || inner.width == 0 {
             return;
         }
-        let width = inner.width as usize;
-        if width == 0 {
-            return;
-        }
-
         let visible_start_row = self.scroll;
         let visible_end_row = visible_start_row + inner.height as usize;
-        let mut heading_iter = self.headings.iter().peekable();
-        if heading_iter.peek().is_none() {
-            return;
-        }
-
-        let mut row_cursor = 0usize;
         let buf = frame.buffer_mut();
-        for (line_idx, line) in self.content.iter().enumerate() {
-            let span_rows = line_row_span(line, width) as usize;
-            if span_rows == 0 {
+        for heading in &self.headings {
+            if heading.line >= self.content.len() {
                 continue;
             }
-            while let Some(heading) = heading_iter.peek() {
-                if heading.line == line_idx {
-                    let row_start = row_cursor;
-                    let row_end = row_cursor + span_rows;
-                    if row_end > visible_start_row && row_start < visible_end_row {
-                        let paint_start = row_start.max(visible_start_row) - visible_start_row;
-                        let paint_end = row_end.min(visible_end_row) - visible_start_row;
-                        let (bg, _) = heading_block_colors(heading.level);
-                        for offset in paint_start..paint_end {
-                            if offset >= inner.height as usize {
-                                break;
-                            }
-                            let y = inner.y + offset as u16;
-                            let x_end = inner.x.saturating_add(inner.width);
-                            for x in inner.x..x_end {
-                                buf.get_mut(x, y).set_bg(bg);
-                            }
-                        }
-                    }
-                    heading_iter.next();
-                } else {
+            let Some((row_start, row_end)) = metrics.line_range(heading.line, heading.line + 1)
+            else {
+                continue;
+            };
+            if row_end <= row_start {
+                continue;
+            }
+            if row_end <= visible_start_row || row_start >= visible_end_row {
+                continue;
+            }
+            let paint_start = row_start.max(visible_start_row) - visible_start_row;
+            let paint_end = row_end.min(visible_end_row) - visible_start_row;
+            let (bg, _) = heading_block_colors(heading.level);
+            for offset in paint_start..paint_end {
+                if offset >= inner.height as usize {
                     break;
                 }
+                let y = inner.y + offset as u16;
+                let x_end = inner.x.saturating_add(inner.width);
+                for x in inner.x..x_end {
+                    buf.get_mut(x, y).set_bg(bg);
+                }
             }
-            row_cursor += span_rows;
-            if row_cursor >= visible_end_row && heading_iter.peek().is_none() {
-                break;
+        }
+    }
+
+    fn render_code_blocks(&self, frame: &mut Frame<'_>, inner: Rect, metrics: &LineMetrics) {
+        if inner.height == 0 || inner.width == 0 {
+            return;
+        }
+        let visible_start_row = self.scroll;
+        let visible_end_row = visible_start_row + inner.height as usize;
+        for block in &self.code_blocks {
+            if block.line_start >= self.content.len() {
+                continue;
             }
+            let end_line = block.line_end.min(self.content.len());
+            let Some((block_row_start, block_row_end)) =
+                metrics.line_range(block.line_start, end_line)
+            else {
+                continue;
+            };
+            if block_row_end <= block_row_start {
+                continue;
+            }
+            if block_row_end <= visible_start_row || block_row_start >= visible_end_row {
+                continue;
+            }
+            let draw_start = block_row_start.max(visible_start_row);
+            let draw_end = block_row_end.min(visible_end_row);
+            let height_rows = draw_end.saturating_sub(draw_start);
+            if height_rows == 0 {
+                continue;
+            }
+            let area_y = inner.y + (draw_start - visible_start_row) as u16;
+            let area = Rect {
+                x: inner.x,
+                y: area_y,
+                width: inner.width,
+                height: height_rows as u16,
+            };
+            let block_lines = self.content[block.line_start..end_line].to_vec();
+            let block_scroll = (draw_start - block_row_start).min(u16::MAX as usize) as u16;
+            let widget = Paragraph::new(block_lines)
+                .wrap(Wrap { trim: false })
+                .scroll((block_scroll, 0))
+                .block(
+                    Block::default()
+                        .title(block.language.as_deref().unwrap_or("code"))
+                        .borders(Borders::ALL)
+                        .style(Style::default().bg(CODE_BLOCK_BG)),
+                );
+            frame.render_widget(widget, area);
         }
     }
 
@@ -276,6 +326,21 @@ fn ensure_non_empty(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
         lines.push(Line::from("(file is empty)"));
     }
     lines
+}
+
+struct LineMetrics {
+    offsets: Vec<usize>,
+}
+
+impl LineMetrics {
+    fn line_range(&self, start_line: usize, end_line: usize) -> Option<(usize, usize)> {
+        if end_line >= self.offsets.len() || start_line >= end_line {
+            return None;
+        }
+        let start = *self.offsets.get(start_line)?;
+        let end = *self.offsets.get(end_line)?;
+        Some((start, end))
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

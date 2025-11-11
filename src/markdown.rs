@@ -6,6 +6,10 @@ use ratatui::{
     text::{Line, Span},
 };
 
+pub const CODE_BLOCK_FG: Color = Color::Rgb(225, 228, 235);
+pub const CODE_BLOCK_BG: Color = Color::Rgb(12, 16, 26);
+pub const CODE_BLOCK_BORDER_FG: Color = Color::Rgb(150, 160, 175);
+
 pub fn markdown_to_render(markdown: &str) -> RenderedMarkdown {
     let mut buffer = MarkdownBuffer::default();
     let parser = Parser::new_ext(
@@ -48,12 +52,20 @@ pub fn line_row_span(line: &Line<'_>, width: usize) -> u16 {
 pub struct RenderedMarkdown {
     pub lines: Vec<Line<'static>>,
     pub headings: Vec<HeadingOverlay>,
+    pub code_blocks: Vec<CodeBlockOverlay>,
 }
 
 #[derive(Clone, Copy)]
 pub struct HeadingOverlay {
     pub line: usize,
     pub level: pulldown_cmark::HeadingLevel,
+}
+
+#[derive(Clone)]
+pub struct CodeBlockOverlay {
+    pub line_start: usize,
+    pub line_end: usize,
+    pub language: Option<String>,
 }
 
 struct MarkdownBuffer {
@@ -63,10 +75,13 @@ struct MarkdownBuffer {
     list_stack: Vec<ListState>,
     blockquote_depth: usize,
     in_code_block: bool,
+    code_block_start: Option<usize>,
+    code_block_language: Option<String>,
     line_start: bool,
     last_blank: bool,
     table: Option<TableBuilder>,
     heading_overlays: Vec<HeadingOverlay>,
+    code_blocks: Vec<CodeBlockOverlay>,
     pending_heading: Option<pulldown_cmark::HeadingLevel>,
 }
 
@@ -79,10 +94,13 @@ impl Default for MarkdownBuffer {
             list_stack: Vec::new(),
             blockquote_depth: 0,
             in_code_block: false,
+            code_block_start: None,
+            code_block_language: None,
             line_start: true,
             last_blank: true,
             table: None,
             heading_overlays: Vec::new(),
+            code_blocks: Vec::new(),
             pending_heading: None,
         }
     }
@@ -320,6 +338,7 @@ impl MarkdownBuffer {
             }
             Tag::CodeBlock(_) => {
                 self.flush_line(false);
+                self.finish_code_block();
                 self.pop_style();
                 self.in_code_block = false;
                 self.push_blank_line();
@@ -334,15 +353,21 @@ impl MarkdownBuffer {
 
     fn start_code_block(&mut self, kind: CodeBlockKind<'_>) {
         self.ensure_block_gap();
-        if let CodeBlockKind::Fenced(info) = kind {
-            let info = info.trim();
-            if !info.is_empty() {
-                self.push_text(CowStr::from(format!("```{info}")));
-                self.soft_break();
+        self.flush_line(false);
+        self.code_block_language = match kind {
+            CodeBlockKind::Fenced(info) => {
+                let trimmed = info.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
             }
-        }
+            CodeBlockKind::Indented => None,
+        };
+        self.code_block_start = Some(self.lines.len());
         self.in_code_block = true;
-        self.push_style(Style::default().fg(Color::Yellow));
+        self.push_style(Self::code_block_style());
     }
 
     fn start_list_item(&mut self) {
@@ -484,17 +509,45 @@ impl MarkdownBuffer {
 
     fn insert_prefixes(&mut self) {
         if self.in_code_block {
-            self.current.push(Span::raw("    "));
+            self.current
+                .push(Span::styled("    ", Self::code_block_style()));
         }
         if self.blockquote_depth > 0 {
             let mut prefix = String::new();
             for _ in 0..self.blockquote_depth {
                 prefix.push_str("> ");
             }
-            self.current
-                .push(Span::styled(prefix, Style::default().fg(Color::DarkGray)));
+            let mut style = Style::default().fg(Color::DarkGray);
+            if self.in_code_block {
+                style = style.bg(CODE_BLOCK_BG);
+            }
+            self.current.push(Span::styled(prefix, style));
         }
         self.line_start = false;
+    }
+
+    fn finish_code_block(&mut self) {
+        let Some(start) = self.code_block_start.take() else {
+            self.code_block_language = None;
+            return;
+        };
+        if start > self.lines.len() {
+            self.code_block_language = None;
+            return;
+        }
+        if start == self.lines.len() {
+            self.lines.push(Line::default());
+        }
+        let end = self.lines.len();
+        if end > start {
+            self.code_blocks.push(CodeBlockOverlay {
+                line_start: start,
+                line_end: end,
+                language: self.code_block_language.take(),
+            });
+        } else {
+            self.code_block_language = None;
+        }
     }
 
     fn soft_break(&mut self) {
@@ -560,6 +613,7 @@ impl MarkdownBuffer {
         RenderedMarkdown {
             lines: self.lines,
             headings: self.heading_overlays,
+            code_blocks: self.code_blocks,
         }
     }
 
@@ -582,6 +636,12 @@ impl MarkdownBuffer {
                 .fg(Color::Gray)
                 .add_modifier(Modifier::ITALIC),
         }
+    }
+}
+
+impl MarkdownBuffer {
+    fn code_block_style() -> Style {
+        Style::default().fg(CODE_BLOCK_FG).bg(CODE_BLOCK_BG)
     }
 }
 
@@ -874,6 +934,41 @@ mod tests {
             .join("\n");
         assert!(text.contains("1. first"));
         assert!(text.contains("2. second"));
+    }
+
+    #[test]
+    fn code_block_overlay_records_language_and_lines() {
+        let markdown = "before\n```rust\nfn main() {}\n```\nafter\n";
+        let render = markdown_to_render(markdown);
+        assert_eq!(render.code_blocks.len(), 1);
+        let block = &render.code_blocks[0];
+        assert_eq!(block.language.as_deref(), Some("rust"));
+        assert!(block.line_end > block.line_start);
+        let code_slice = &render.lines[block.line_start..block.line_end];
+        let combined: String = code_slice
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(combined.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn code_block_lines_use_background_color() {
+        let markdown = "```\nlet x = 42;\n```\n";
+        let render = markdown_to_render(markdown);
+        let code_line = render
+            .lines
+            .iter()
+            .find(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.as_ref().contains("let x = 42;"))
+            })
+            .expect("code line rendered");
+        assert!(!code_line.spans.is_empty());
+        for span in &code_line.spans {
+            assert_eq!(span.style.bg, Some(CODE_BLOCK_BG));
+        }
     }
 
     #[test]

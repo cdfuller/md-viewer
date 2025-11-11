@@ -15,10 +15,13 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use markdown::{heading_block_colors, markdown_to_render};
+use markdown::{
+    heading_block_colors, markdown_to_render, CodeBlockOverlay, CODE_BLOCK_BG, CODE_BLOCK_BORDER_FG,
+};
 use ratatui::{
     backend::CrosstermBackend,
     style::{Color, Modifier, Style},
+    text::Line,
     Terminal,
 };
 
@@ -146,38 +149,163 @@ fn dump_file(path: &Path) -> io::Result<()> {
         .map(|(w, _)| w as usize)
         .unwrap_or(80);
     let mut out = io::BufWriter::new(io::stdout());
-    for (idx, line) in render.lines.iter().enumerate() {
-        let base_bg = heading_bg.get(&idx).copied();
-        let mut rendered_width = 0usize;
-        for span in &line.spans {
-            write!(
-                out,
-                "{}{}{}",
-                style_prefix(span.style, base_bg),
-                span.content,
-                ANSI_RESET
-            )?;
-            rendered_width += span.content.chars().count();
-        }
-        if let Some(bg) = base_bg {
-            if rendered_width < term_width {
-                let remaining = term_width - rendered_width;
-                let filler_style = Style::default().bg(bg);
-                write!(
-                    out,
-                    "{}{}{}",
-                    style_prefix(filler_style, Some(bg)),
-                    " ".repeat(remaining),
-                    ANSI_RESET
-                )?;
+    let mut idx = 0usize;
+    let mut code_iter = render.code_blocks.iter().peekable();
+    while idx < render.lines.len() {
+        if let Some(block) = code_iter.peek() {
+            if idx == block.line_start {
+                let end = block.line_end.min(render.lines.len());
+                let slice = &render.lines[block.line_start..end];
+                write_code_block_dump(&mut out, slice, block, term_width)?;
+                idx = block.line_end;
+                code_iter.next();
+                continue;
             }
         }
-        writeln!(out)?;
+        let line = &render.lines[idx];
+        let base_bg = heading_bg.get(&idx).copied();
+        write_regular_line_dump(&mut out, line, base_bg, term_width)?;
+        idx += 1;
     }
     out.flush()
 }
 
 const ANSI_RESET: &str = "\x1b[0m";
+
+fn write_regular_line_dump(
+    out: &mut impl Write,
+    line: &Line<'_>,
+    base_bg: Option<Color>,
+    term_width: usize,
+) -> io::Result<()> {
+    let rendered_width = write_line_content(out, line, base_bg)?;
+    if let Some(bg) = base_bg {
+        if rendered_width < term_width {
+            let remaining = term_width - rendered_width;
+            let filler_style = Style::default().bg(bg);
+            write!(
+                out,
+                "{}{}{}",
+                style_prefix(filler_style, Some(bg)),
+                " ".repeat(remaining),
+                ANSI_RESET
+            )?;
+        }
+    }
+    writeln!(out)
+}
+
+fn write_code_block_dump(
+    out: &mut impl Write,
+    lines: &[Line<'_>],
+    block: &CodeBlockOverlay,
+    term_width: usize,
+) -> io::Result<()> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let available_width = term_width.saturating_sub(4).max(1);
+    let mut rows: Vec<Vec<(Style, String)>> = Vec::new();
+    for line in lines {
+        let mut wrapped = wrap_line(line, available_width);
+        rows.append(&mut wrapped);
+    }
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    let content_width = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|(_, text)| text.chars().count())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let inner_width = content_width + 2;
+    write_code_block_border(out, block.language.as_deref(), inner_width, true)?;
+    let border_style = code_block_border_style();
+    for row in &rows {
+        write!(
+            out,
+            "{}│ {}",
+            style_prefix(border_style, Some(CODE_BLOCK_BG)),
+            ANSI_RESET
+        )?;
+        let rendered = write_segments(
+            out,
+            row.iter().map(|(style, text)| (*style, text.as_str())),
+            Some(CODE_BLOCK_BG),
+        )?;
+        if rendered < content_width {
+            let padding = content_width - rendered;
+            let padding_style = Style::default().bg(CODE_BLOCK_BG);
+            write!(
+                out,
+                "{}{}{}",
+                style_prefix(padding_style, Some(CODE_BLOCK_BG)),
+                " ".repeat(padding),
+                ANSI_RESET
+            )?;
+        }
+        write!(
+            out,
+            "{} │{}",
+            style_prefix(border_style, Some(CODE_BLOCK_BG)),
+            ANSI_RESET
+        )?;
+        writeln!(out)?;
+    }
+    write_code_block_border(out, None, inner_width, false)
+}
+
+fn write_code_block_border(
+    out: &mut impl Write,
+    title: Option<&str>,
+    inner_width: usize,
+    top: bool,
+) -> io::Result<()> {
+    let mut line = String::new();
+    let (left, right) = if top { ('┌', '┐') } else { ('└', '┘') };
+    line.push(left);
+    if let Some(label) = title {
+        let title_text = format!(" {} ", label);
+        let title_len = title_text.chars().count();
+        if title_len >= inner_width {
+            let truncated: String = title_text.chars().take(inner_width).collect();
+            line.push_str(&truncated);
+        } else {
+            line.push_str(&title_text);
+            line.push_str(&"─".repeat(inner_width - title_len));
+        }
+    } else {
+        line.push_str(&"─".repeat(inner_width));
+    }
+    line.push(right);
+    write!(
+        out,
+        "{}{}{}",
+        style_prefix(code_block_border_style(), Some(CODE_BLOCK_BG)),
+        line,
+        ANSI_RESET
+    )?;
+    writeln!(out)
+}
+
+fn write_line_content(
+    out: &mut impl Write,
+    line: &Line<'_>,
+    default_bg: Option<Color>,
+) -> io::Result<usize> {
+    write_segments(
+        out,
+        line.spans
+            .iter()
+            .map(|span| (span.style, span.content.as_ref())),
+        default_bg,
+    )
+}
 
 fn style_prefix(mut style: Style, default_bg: Option<Color>) -> String {
     if style.bg.is_none() {
@@ -214,6 +342,92 @@ fn style_prefix(mut style: Style, default_bg: Option<Color>) -> String {
     } else {
         format!("\x1b[{}m", codes.join(";"))
     }
+}
+
+fn code_block_border_style() -> Style {
+    Style::default()
+        .fg(CODE_BLOCK_BORDER_FG)
+        .bg(CODE_BLOCK_BG)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn write_segments<'a, I>(
+    out: &mut impl Write,
+    segments: I,
+    default_bg: Option<Color>,
+) -> io::Result<usize>
+where
+    I: IntoIterator<Item = (Style, &'a str)>,
+{
+    let mut rendered_width = 0usize;
+    for (style, text) in segments {
+        write!(
+            out,
+            "{}{}{}",
+            style_prefix(style, default_bg),
+            text,
+            ANSI_RESET
+        )?;
+        rendered_width += text.chars().count();
+    }
+    Ok(rendered_width)
+}
+
+fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Vec<(Style, String)>> {
+    if width == 0 {
+        return vec![Vec::new()];
+    }
+    let mut rows: Vec<Vec<(Style, String)>> = Vec::new();
+    let mut current: Vec<(Style, String)> = Vec::new();
+    let mut current_width = 0usize;
+    for span in &line.spans {
+        let mut remaining = span.content.as_ref();
+        while !remaining.is_empty() {
+            let available = width - current_width;
+            if available == 0 {
+                rows.push(std::mem::take(&mut current));
+                current_width = 0;
+                continue;
+            }
+            let (prefix, rest, consumed) = take_prefix(remaining, available);
+            if consumed == 0 {
+                break;
+            }
+            current.push((span.style, prefix.to_string()));
+            remaining = rest;
+            current_width += consumed;
+            if current_width == width {
+                rows.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+        }
+    }
+    rows.push(current);
+    rows.retain(|row| !row.is_empty());
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    rows
+}
+
+fn take_prefix(text: &str, limit: usize) -> (&str, &str, usize) {
+    if limit == 0 {
+        return ("", text, 0);
+    }
+    let mut end = 0;
+    let mut count = 0;
+    for (idx, ch) in text.char_indices() {
+        if count == limit {
+            break;
+        }
+        end = idx + ch.len_utf8();
+        count += 1;
+    }
+    if count < limit {
+        end = text.len();
+    }
+    let (head, tail) = text.split_at(end);
+    (head, tail, count)
 }
 
 fn color_code(color: Color, is_fg: bool) -> String {
