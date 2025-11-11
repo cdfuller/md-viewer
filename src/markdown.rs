@@ -53,6 +53,7 @@ pub struct RenderedMarkdown {
     pub lines: Vec<Line<'static>>,
     pub headings: Vec<HeadingOverlay>,
     pub code_blocks: Vec<CodeBlockOverlay>,
+    pub rules: Vec<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -82,6 +83,7 @@ struct MarkdownBuffer {
     table: Option<TableBuilder>,
     heading_overlays: Vec<HeadingOverlay>,
     code_blocks: Vec<CodeBlockOverlay>,
+    rule_lines: Vec<usize>,
     pending_heading: Option<pulldown_cmark::HeadingLevel>,
 }
 
@@ -101,6 +103,7 @@ impl Default for MarkdownBuffer {
             table: None,
             heading_overlays: Vec::new(),
             code_blocks: Vec::new(),
+            rule_lines: Vec::new(),
             pending_heading: None,
         }
     }
@@ -596,10 +599,10 @@ impl MarkdownBuffer {
 
     fn push_rule(&mut self) {
         self.ensure_block_gap();
-        self.lines.push(Line::from(vec![Span::styled(
-            "-".repeat(20),
-            Style::default().fg(Color::DarkGray),
-        )]));
+        let line_index = self.lines.len();
+        self.lines.push(Line::default());
+        self.rule_lines.push(line_index);
+        self.last_blank = false;
         self.lines.push(Line::default());
         self.last_blank = true;
         self.line_start = true;
@@ -614,6 +617,7 @@ impl MarkdownBuffer {
             lines: self.lines,
             headings: self.heading_overlays,
             code_blocks: self.code_blocks,
+            rules: self.rule_lines,
         }
     }
 
@@ -934,6 +938,16 @@ mod tests {
             .join("\n");
         assert!(text.contains("1. first"));
         assert!(text.contains("2. second"));
+    }
+
+    #[test]
+    fn rule_lines_are_recorded() {
+        let markdown = "before\n\n---\n\nafter";
+        let render = markdown_to_render(markdown);
+        assert_eq!(render.rules.len(), 1);
+        let line_idx = render.rules[0];
+        assert!(line_idx < render.lines.len());
+        assert!(render.lines[line_idx].spans.is_empty());
     }
 
     #[test]

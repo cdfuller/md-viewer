@@ -2,9 +2,10 @@ mod app;
 mod markdown;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fs,
     io::{self, stdout, Write},
+    mem,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -145,6 +146,7 @@ fn dump_file(path: &Path) -> io::Result<()> {
         let (bg, _) = heading_block_colors(heading.level);
         heading_bg.insert(heading.line, bg);
     }
+    let rule_lines: HashSet<usize> = render.rules.iter().copied().collect();
     let term_width = crossterm::terminal::size()
         .map(|(w, _)| w as usize)
         .unwrap_or(80);
@@ -152,6 +154,11 @@ fn dump_file(path: &Path) -> io::Result<()> {
     let mut idx = 0usize;
     let mut code_iter = render.code_blocks.iter().peekable();
     while idx < render.lines.len() {
+        if rule_lines.contains(&idx) {
+            write_rule_line_dump(&mut out, term_width)?;
+            idx += 1;
+            continue;
+        }
         if let Some(block) = code_iter.peek() {
             if idx == block.line_start {
                 let end = block.line_end.min(render.lines.len());
@@ -192,6 +199,19 @@ fn write_regular_line_dump(
             )?;
         }
     }
+    writeln!(out)
+}
+
+fn write_rule_line_dump(out: &mut impl Write, term_width: usize) -> io::Result<()> {
+    let width = term_width.max(1);
+    let style = Style::default().fg(Color::DarkGray);
+    write!(
+        out,
+        "{}{}{}",
+        style_prefix(style, None),
+        "─".repeat(width),
+        ANSI_RESET
+    )?;
     writeln!(out)
 }
 
@@ -385,7 +405,7 @@ fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Vec<(Style, String)>> {
         while !remaining.is_empty() {
             let available = width - current_width;
             if available == 0 {
-                rows.push(std::mem::take(&mut current));
+                rows.push(mem::take(&mut current));
                 current_width = 0;
                 continue;
             }
@@ -397,7 +417,7 @@ fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Vec<(Style, String)>> {
             remaining = rest;
             current_width += consumed;
             if current_width == width {
-                rows.push(std::mem::take(&mut current));
+                rows.push(mem::take(&mut current));
                 current_width = 0;
             }
         }

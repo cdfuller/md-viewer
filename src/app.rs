@@ -20,6 +20,7 @@ pub struct App {
     content: Vec<Line<'static>>,
     headings: Vec<HeadingOverlay>,
     code_blocks: Vec<CodeBlockOverlay>,
+    rules: Vec<usize>,
     scroll: usize,
     viewport_height: u16,
     viewport_width: u16,
@@ -39,6 +40,7 @@ impl App {
             path,
             headings: render.headings,
             code_blocks: render.code_blocks,
+            rules: render.rules,
             content: ensure_non_empty(render.lines),
             scroll: 0,
             viewport_height: 0,
@@ -54,6 +56,7 @@ impl App {
         self.content = ensure_non_empty(render.lines);
         self.headings = render.headings;
         self.code_blocks = render.code_blocks;
+        self.rules = render.rules;
         self.scroll = 0;
         Ok(())
     }
@@ -81,6 +84,7 @@ impl App {
         frame.render_widget(paragraph, viewport);
 
         self.highlight_headings(frame, inner, &metrics);
+        self.render_rules(frame, inner, &metrics);
         self.render_code_blocks(frame, inner, &metrics);
 
         let status = Paragraph::new(self.status_line()).wrap(Wrap { trim: true });
@@ -241,6 +245,45 @@ impl App {
                         .style(Style::default().bg(CODE_BLOCK_BG)),
                 );
             frame.render_widget(widget, area);
+        }
+    }
+
+    fn render_rules(&self, frame: &mut Frame<'_>, inner: Rect, metrics: &LineMetrics) {
+        if inner.height == 0 || inner.width == 0 {
+            return;
+        }
+        let visible_start_row = self.scroll;
+        let visible_end_row = visible_start_row + inner.height as usize;
+        let buf = frame.buffer_mut();
+        let style = Style::default().fg(Color::DarkGray);
+        for &line_idx in &self.rules {
+            if line_idx >= self.content.len() {
+                continue;
+            }
+            let Some((row_start, row_end)) = metrics.line_range(line_idx, line_idx + 1) else {
+                continue;
+            };
+            if row_end <= row_start {
+                continue;
+            }
+            if row_end <= visible_start_row || row_start >= visible_end_row {
+                continue;
+            }
+            let draw_start = row_start.max(visible_start_row);
+            let draw_end = row_end.min(visible_end_row);
+            for row in draw_start..draw_end {
+                let offset = row - visible_start_row;
+                if offset >= inner.height as usize {
+                    break;
+                }
+                let y = inner.y + offset as u16;
+                let x_end = inner.x.saturating_add(inner.width);
+                for x in inner.x..x_end {
+                    let cell = buf.get_mut(x, y);
+                    cell.set_symbol("─");
+                    cell.set_style(style);
+                }
+            }
         }
     }
 
