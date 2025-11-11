@@ -62,25 +62,28 @@ fn run(
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> io::Result<bool> {
+    if app.is_help_open() {
+        match key.code {
+            KeyCode::Char('?') | KeyCode::Esc => app.toggle_help(),
+            _ => {}
+        }
+        return Ok(false);
+    }
     match key.code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
-        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('p') => app.scroll_up(1),
-        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('n') => app.scroll_down(1),
-        KeyCode::PageUp => app.scroll_up(app.viewport_height().saturating_sub(1)),
-        KeyCode::PageDown => app.scroll_down(app.viewport_height().saturating_sub(1)),
-        KeyCode::Char(' ') if key.modifiers.is_empty() => {
-            app.scroll_down(app.viewport_height().saturating_sub(1))
-        }
-        KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            app.scroll_up(app.viewport_height().saturating_sub(1))
-        }
+        KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
+        KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
+        KeyCode::PageUp | KeyCode::Char('p') => app.page_up(),
+        KeyCode::PageDown | KeyCode::Char('n') => app.page_down(),
+        KeyCode::Char(' ') => app.page_down(),
         KeyCode::Home | KeyCode::Char('g') => app.scroll_to(0),
         KeyCode::End | KeyCode::Char('G') => app.scroll_to_end(),
         KeyCode::Char('r') => match app.reload() {
             Ok(()) => app.set_status("Reloaded file"),
             Err(err) => app.set_status(format!("Reload failed: {err}")),
         },
+        KeyCode::Char('?') => app.toggle_help(),
         _ => {}
     }
 

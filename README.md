@@ -21,13 +21,14 @@ md-viewer renders CommonMark files directly in your terminal using Ratatui's ric
 
 ## Controls
 
-- `n` / `p`: scroll one line (arrows still work too)
-- `Space` / `Shift+Space`: scroll by one viewport
+- `j` / `k` (or arrow keys): scroll one line
+- `n` / `p` (or `Space` / `PgUp` / `PgDn`): scroll by one viewport
 - `PgUp` / `PgDn`: also scroll by a viewport
 - `g` / `Home`: jump to the top
 - `G` / `End`: jump to the bottom
 - `r`: reload the file from disk
 - `q` or `Ctrl+C`: exit the application
+- `?`: toggle the in-app help overlay (Esc closes it too)
 
 ## Development Notes
 

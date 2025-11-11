@@ -8,9 +8,9 @@ use crate::markdown::{
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -18,9 +18,11 @@ pub struct App {
     path: PathBuf,
     content: Vec<Line<'static>>,
     headings: Vec<HeadingOverlay>,
-    scroll: u16,
+    scroll: usize,
     viewport_height: u16,
+    viewport_width: u16,
     status: Option<String>,
+    show_help: bool,
 }
 
 impl App {
@@ -37,7 +39,9 @@ impl App {
             content: ensure_non_empty(render.lines),
             scroll: 0,
             viewport_height: 0,
-            status: Some(String::from("Press q to quit, arrows to scroll")),
+            viewport_width: 80,
+            status: Some(String::from("Press ? for help, q to quit")),
+            show_help: false,
         }
     }
 
@@ -63,10 +67,11 @@ impl App {
         let viewport = layout[0];
         let inner = viewer_block.inner(viewport);
         self.viewport_height = inner.height.max(1);
+        self.viewport_width = inner.width.max(1);
 
         let paragraph = Paragraph::new(self.content.clone())
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll, 0))
+            .scroll((self.scroll as u16, 0))
             .block(viewer_block);
         frame.render_widget(paragraph, viewport);
 
@@ -74,44 +79,65 @@ impl App {
 
         let status = Paragraph::new(self.status_line()).wrap(Wrap { trim: true });
         frame.render_widget(status, layout[1]);
+
+        if self.show_help {
+            self.render_help(frame, frame.size());
+        }
     }
 
-    pub fn scroll_up(&mut self, lines: u16) {
-        self.scroll = self.scroll.saturating_sub(lines.max(1));
+    pub fn scroll_up(&mut self, rows: usize) {
+        if rows == 0 {
+            return;
+        }
+        self.scroll = self.scroll.saturating_sub(rows);
     }
 
-    pub fn scroll_down(&mut self, lines: u16) {
-        let max_scroll = self.max_scroll();
-        self.scroll = (self.scroll + lines.max(1)).min(max_scroll);
+    pub fn scroll_down(&mut self, rows: usize) {
+        if rows == 0 {
+            return;
+        }
+        self.scroll = self.scroll.saturating_add(rows).min(self.max_scroll());
     }
 
-    pub fn scroll_to(&mut self, line: u16) {
-        self.scroll = line.min(self.max_scroll());
+    pub fn page_up(&mut self) {
+        self.scroll_up(self.viewport_height.max(1) as usize);
+    }
+
+    pub fn page_down(&mut self) {
+        self.scroll_down(self.viewport_height.max(1) as usize);
+    }
+
+    pub fn scroll_to(&mut self, row: usize) {
+        self.scroll = row.min(self.max_scroll());
     }
 
     pub fn scroll_to_end(&mut self) {
         self.scroll = self.max_scroll();
     }
 
-    pub fn viewport_height(&self) -> u16 {
-        self.viewport_height
-    }
-
     pub fn set_status<T: Into<String>>(&mut self, msg: T) {
         self.status = Some(msg.into());
     }
 
-    fn max_scroll(&self) -> u16 {
-        if self.viewport_height == 0 {
-            return 0;
-        }
-        let content_height = self.content.len() as i32;
-        let viewport = self.viewport_height as i32;
-        if content_height <= viewport {
-            0
-        } else {
-            (content_height - viewport) as u16
-        }
+    pub fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+    }
+
+    pub fn is_help_open(&self) -> bool {
+        self.show_help
+    }
+
+    fn max_scroll(&self) -> usize {
+        self.total_rows()
+            .saturating_sub(self.viewport_height as usize)
+    }
+
+    fn total_rows(&self) -> usize {
+        let width = self.viewport_width.max(1) as usize;
+        self.content
+            .iter()
+            .map(|line| line_row_span(line, width) as usize)
+            .sum()
     }
 
     fn highlight_headings(&self, frame: &mut Frame<'_>, inner: Rect) {
@@ -123,7 +149,7 @@ impl App {
             return;
         }
 
-        let visible_start_row = self.scroll as usize;
+        let visible_start_row = self.scroll;
         let visible_end_row = visible_start_row + inner.height as usize;
         let mut heading_iter = self.headings.iter().peekable();
         if heading_iter.peek().is_none() {
@@ -168,6 +194,54 @@ impl App {
         }
     }
 
+    fn render_help(&self, frame: &mut Frame<'_>, area: Rect) {
+        let popup = centered_rect(80, 80, area);
+        frame.render_widget(Clear, popup);
+
+        let block = Block::default()
+            .title("Help (? / Esc to close)")
+            .borders(Borders::ALL)
+            .style(Style::default().bg(Color::Black));
+
+        let mut lines = Vec::new();
+        let header_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let bullet = |text: &str| Line::from(format!("  • {text}"));
+
+        lines.push(Line::from(Span::styled("Navigation", header_style)));
+        lines.push(bullet("Space / n: page down"));
+        lines.push(bullet("p: page up"));
+        lines.push(bullet("j / k or arrow keys: line scroll"));
+        lines.push(bullet("PgUp / PgDn: page scroll"));
+        lines.push(bullet("g or Home: top  |  G or End: bottom"));
+        lines.push(bullet("r: reload file  |  q or Ctrl+C: quit"));
+        lines.push(bullet("?: toggle this help overlay"));
+        lines.push(Line::from(""));
+
+        lines.push(Line::from(Span::styled("Heading Styles", header_style)));
+        lines.push(bullet(
+            "H1/H2 headings use tinted bands for major sections.",
+        ));
+        lines.push(bullet(
+            "H3-H6 darken progressively to show nested hierarchy.",
+        ));
+        lines.push(bullet("Highlights span the full width behind the text."));
+        lines.push(Line::from(""));
+
+        lines.push(Line::from(Span::styled("Tips", header_style)));
+        lines.push(bullet(
+            "Edit in another window, press r to refresh instantly.",
+        ));
+        lines.push(bullet("Use Space/PgDn to skim; g/G jump to top/bottom."));
+        lines.push(bullet("Arrow keys still work for fine-grained scrolling."));
+
+        let paragraph = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block);
+        frame.render_widget(paragraph, popup);
+    }
+
     fn title_line(&self) -> Line<'static> {
         Line::from(vec![
             Span::styled(
@@ -184,7 +258,7 @@ impl App {
 
     fn status_line(&self) -> Line<'static> {
         let mut spans = vec![Span::raw(
-            "Space: page ↓  Shift+Space: page ↑  n/p: line  g/G: top/end  r: reload  q: quit",
+            "Space or n: page ↓  p: page ↑  j/k: line  g/G: top/end  r: reload  q: quit",
         )];
         if let Some(status) = &self.status {
             spans.push(Span::raw("  -  "));
@@ -202,4 +276,30 @@ fn ensure_non_empty(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
         lines.push(Line::from("(file is empty)"));
     }
     lines
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage(percent_y),
+                Constraint::Percentage((100 - percent_y) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(area);
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage(percent_x),
+                Constraint::Percentage((100 - percent_x) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(vertical[1]);
+    horizontal[1]
 }
