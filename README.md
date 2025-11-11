@@ -6,12 +6,18 @@ md-viewer renders CommonMark files directly in your terminal using Ratatui's ric
 
 1. Install the Rust toolchain (https://rustup.rs/) so `cargo` is available on your PATH.
 2. Fetch dependencies and build the project:
+
    ```sh
    cargo build
    ```
+   
 3. Run the viewer against any markdown file:
    ```sh
    cargo run -- path/to/file.md
+   ```
+   To print a plain-text rendering without the TUI, add `--dump` before the path:
+   ```sh
+   cargo run -- --dump path/to/file.md
    ```
 4. (Optional) Run formatter and tests:
    ```sh
