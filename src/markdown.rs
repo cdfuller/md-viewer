@@ -69,42 +69,169 @@ pub struct CodeBlockOverlay {
     pub language: Option<String>,
 }
 
-struct MarkdownBuffer {
+struct LineWriter {
     lines: Vec<Line<'static>>,
     current: Vec<Span<'static>>,
+    line_start: bool,
+    last_blank: bool,
+    pending_heading: Option<pulldown_cmark::HeadingLevel>,
+    heading_overlays: Vec<HeadingOverlay>,
+}
+
+impl Default for LineWriter {
+    fn default() -> Self {
+        Self {
+            lines: Vec::new(),
+            current: Vec::new(),
+            line_start: true,
+            last_blank: true,
+            pending_heading: None,
+            heading_overlays: Vec::new(),
+        }
+    }
+}
+
+impl LineWriter {
+    fn is_line_start(&self) -> bool {
+        self.line_start
+    }
+
+    fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    fn queue_heading(&mut self, level: pulldown_cmark::HeadingLevel) {
+        self.pending_heading = Some(level);
+    }
+
+    fn push_span(&mut self, span: Span<'static>, mark_content: bool) {
+        self.current.push(span);
+        if mark_content {
+            self.last_blank = false;
+        }
+        self.line_start = false;
+    }
+
+    fn flush_line(&mut self, allow_empty: bool) {
+        if self.current.is_empty() {
+            if allow_empty {
+                self.lines.push(Line::default());
+                self.last_blank = true;
+            }
+        } else {
+            let spans = mem::take(&mut self.current);
+            self.lines.push(Line::from(spans));
+            self.last_blank = false;
+            if let Some(level) = self.pending_heading.take() {
+                let line_index = self.lines.len().saturating_sub(1);
+                self.heading_overlays.push(HeadingOverlay {
+                    line: line_index,
+                    level,
+                });
+            }
+        }
+        self.line_start = true;
+    }
+
+    fn ensure_block_gap(&mut self) {
+        if !self.is_empty() && !self.last_blank {
+            self.lines.push(Line::default());
+            self.last_blank = true;
+        }
+        self.line_start = true;
+    }
+
+    fn push_blank_line(&mut self) {
+        if !self.last_blank {
+            self.lines.push(Line::default());
+            self.last_blank = true;
+        }
+        self.line_start = true;
+    }
+
+    fn push_manual_line(&mut self, line: Line<'static>) -> usize {
+        let idx = self.lines.len();
+        self.lines.push(line);
+        self.last_blank = self.lines[idx].spans.is_empty();
+        self.line_start = true;
+        idx
+    }
+
+    fn mark_last_non_blank(&mut self) {
+        self.last_blank = false;
+    }
+
+    fn extend_lines(&mut self, new_lines: Vec<Line<'static>>) {
+        if new_lines.is_empty() {
+            return;
+        }
+        self.lines.extend(new_lines);
+        self.last_blank = self
+            .lines
+            .last()
+            .map(|line| line.spans.is_empty())
+            .unwrap_or(true);
+        self.line_start = true;
+    }
+
+    fn finalize(mut self) -> (Vec<Line<'static>>, Vec<HeadingOverlay>) {
+        if !self.current.is_empty() {
+            let spans = mem::take(&mut self.current);
+            self.lines.push(Line::from(spans));
+        }
+        (self.lines, self.heading_overlays)
+    }
+}
+
+#[derive(Default)]
+struct CodeBlockState {
+    start_line: Option<usize>,
+    language: Option<String>,
+}
+
+impl CodeBlockState {
+    fn is_active(&self) -> bool {
+        self.start_line.is_some()
+    }
+
+    fn start(&mut self, start_line: usize, language: Option<String>) {
+        self.start_line = Some(start_line);
+        self.language = language;
+    }
+
+    fn take(&mut self) -> Option<(usize, Option<String>)> {
+        self.start_line
+            .take()
+            .map(|start| (start, self.language.take()))
+    }
+}
+
+struct MarkdownBuffer {
+    lines: LineWriter,
     style_stack: Vec<Style>,
     list_stack: Vec<ListState>,
     blockquote_depth: usize,
-    in_code_block: bool,
-    code_block_start: Option<usize>,
-    code_block_language: Option<String>,
-    line_start: bool,
-    last_blank: bool,
     table: Option<TableBuilder>,
-    heading_overlays: Vec<HeadingOverlay>,
     code_blocks: Vec<CodeBlockOverlay>,
     rule_lines: Vec<usize>,
-    pending_heading: Option<pulldown_cmark::HeadingLevel>,
+    code_block: CodeBlockState,
 }
 
 impl Default for MarkdownBuffer {
     fn default() -> Self {
         Self {
-            lines: Vec::new(),
-            current: Vec::new(),
+            lines: LineWriter::default(),
             style_stack: vec![Style::default()],
             list_stack: Vec::new(),
             blockquote_depth: 0,
-            in_code_block: false,
-            code_block_start: None,
-            code_block_language: None,
-            line_start: true,
-            last_blank: true,
             table: None,
-            heading_overlays: Vec::new(),
             code_blocks: Vec::new(),
             rule_lines: Vec::new(),
-            pending_heading: None,
+            code_block: CodeBlockState::default(),
         }
     }
 }
@@ -222,7 +349,7 @@ impl MarkdownBuffer {
             Tag::Paragraph => self.ensure_block_gap(),
             Tag::Heading(level, _, _) => {
                 self.ensure_block_gap();
-                self.pending_heading = Some(level);
+                self.lines.queue_heading(level);
                 self.push_style(self.heading_text_style(level));
             }
             Tag::BlockQuote => {
@@ -298,7 +425,7 @@ impl MarkdownBuffer {
                     if rendered.is_empty() {
                         rendered.push(Line::from("(empty table)"));
                     }
-                    self.lines.extend(rendered);
+                    self.lines.extend_lines(rendered);
                     self.push_blank_line();
                 }
                 return;
@@ -343,7 +470,6 @@ impl MarkdownBuffer {
                 self.flush_line(false);
                 self.finish_code_block();
                 self.pop_style();
-                self.in_code_block = false;
                 self.push_blank_line();
             }
             Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link(_, _, _) => {
@@ -357,7 +483,7 @@ impl MarkdownBuffer {
     fn start_code_block(&mut self, kind: CodeBlockKind<'_>) {
         self.ensure_block_gap();
         self.flush_line(false);
-        self.code_block_language = match kind {
+        let language = match kind {
             CodeBlockKind::Fenced(info) => {
                 let trimmed = info.trim();
                 if trimmed.is_empty() {
@@ -368,8 +494,8 @@ impl MarkdownBuffer {
             }
             CodeBlockKind::Indented => None,
         };
-        self.code_block_start = Some(self.lines.len());
-        self.in_code_block = true;
+        let start = self.lines.len();
+        self.code_block.start(start, language);
         self.push_style(Self::code_block_style());
     }
 
@@ -385,13 +511,13 @@ impl MarkdownBuffer {
             } else {
                 format!("{}- ", padding)
             };
-            self.current
-                .push(Span::styled(bullet, Style::default().fg(Color::Gray)));
-            self.line_start = false;
+            self.lines.push_span(
+                Span::styled(bullet, Style::default().fg(Color::Gray)),
+                false,
+            );
         } else {
-            self.current
-                .push(Span::styled("- ", Style::default().fg(Color::Gray)));
-            self.line_start = false;
+            self.lines
+                .push_span(Span::styled("- ", Style::default().fg(Color::Gray)), false);
         }
     }
 
@@ -416,7 +542,7 @@ impl MarkdownBuffer {
         if text.is_empty() {
             return;
         }
-        if self.in_code_block && text.contains('\n') {
+        if self.code_block.is_active() && text.contains('\n') {
             let mut buffer = String::new();
             for ch in text.chars() {
                 if ch == '\n' {
@@ -442,12 +568,12 @@ impl MarkdownBuffer {
         if self.style_stack.is_empty() {
             self.style_stack.push(Style::default());
         }
-        if self.line_start {
+        if self.lines.is_line_start() {
             self.insert_prefixes();
         }
         let style = self.current_style();
-        self.current.push(Span::styled(text.to_string(), style));
-        self.last_blank = false;
+        self.lines
+            .push_span(Span::styled(text.to_string(), style), true);
     }
 
     fn push_code_span(&mut self, text: CowStr<'_>) {
@@ -455,12 +581,11 @@ impl MarkdownBuffer {
             .current_style()
             .fg(Color::Yellow)
             .add_modifier(Modifier::DIM);
-        if self.line_start {
+        if self.lines.is_line_start() {
             self.insert_prefixes();
         }
-        self.current
-            .push(Span::styled(format!("`{}`", text), style));
-        self.last_blank = false;
+        self.lines
+            .push_span(Span::styled(format!("`{}`", text), style), true);
     }
 
     fn table_cell_active(&self) -> bool {
@@ -511,9 +636,9 @@ impl MarkdownBuffer {
     }
 
     fn insert_prefixes(&mut self) {
-        if self.in_code_block {
-            self.current
-                .push(Span::styled("    ", Self::code_block_style()));
+        if self.code_block.is_active() {
+            self.lines
+                .push_span(Span::styled("    ", Self::code_block_style()), false);
         }
         if self.blockquote_depth > 0 {
             let mut prefix = String::new();
@@ -521,35 +646,30 @@ impl MarkdownBuffer {
                 prefix.push_str("> ");
             }
             let mut style = Style::default().fg(Color::DarkGray);
-            if self.in_code_block {
+            if self.code_block.is_active() {
                 style = style.bg(CODE_BLOCK_BG);
             }
-            self.current.push(Span::styled(prefix, style));
+            self.lines.push_span(Span::styled(prefix, style), false);
         }
-        self.line_start = false;
     }
 
     fn finish_code_block(&mut self) {
-        let Some(start) = self.code_block_start.take() else {
-            self.code_block_language = None;
+        let Some((start, language)) = self.code_block.take() else {
             return;
         };
         if start > self.lines.len() {
-            self.code_block_language = None;
             return;
         }
         if start == self.lines.len() {
-            self.lines.push(Line::default());
+            self.lines.push_manual_line(Line::default());
         }
         let end = self.lines.len();
         if end > start {
             self.code_blocks.push(CodeBlockOverlay {
                 line_start: start,
                 line_end: end,
-                language: self.code_block_language.take(),
+                language,
             });
-        } else {
-            self.code_block_language = None;
         }
     }
 
@@ -562,60 +682,29 @@ impl MarkdownBuffer {
     }
 
     fn flush_line(&mut self, allow_empty: bool) {
-        if self.current.is_empty() {
-            if allow_empty {
-                self.lines.push(Line::default());
-                self.last_blank = true;
-            }
-        } else {
-            let spans = mem::take(&mut self.current);
-            self.lines.push(Line::from(spans));
-            self.last_blank = false;
-            if let Some(level) = self.pending_heading.take() {
-                let line_index = self.lines.len().saturating_sub(1);
-                self.heading_overlays.push(HeadingOverlay {
-                    line: line_index,
-                    level,
-                });
-            }
-        }
-        self.line_start = true;
+        self.lines.flush_line(allow_empty);
     }
     fn ensure_block_gap(&mut self) {
-        if !self.lines.is_empty() && !self.last_blank {
-            self.lines.push(Line::default());
-            self.last_blank = true;
-        }
-        self.line_start = true;
+        self.lines.ensure_block_gap();
     }
 
     fn push_blank_line(&mut self) {
-        if !self.last_blank {
-            self.lines.push(Line::default());
-            self.last_blank = true;
-        }
-        self.line_start = true;
+        self.lines.push_blank_line();
     }
 
     fn push_rule(&mut self) {
         self.ensure_block_gap();
-        let line_index = self.lines.len();
-        self.lines.push(Line::default());
+        let line_index = self.lines.push_manual_line(Line::default());
         self.rule_lines.push(line_index);
-        self.last_blank = false;
-        self.lines.push(Line::default());
-        self.last_blank = true;
-        self.line_start = true;
+        self.lines.mark_last_non_blank();
+        self.lines.push_blank_line();
     }
 
-    fn finalize(mut self) -> RenderedMarkdown {
-        if !self.current.is_empty() {
-            let spans = mem::take(&mut self.current);
-            self.lines.push(Line::from(spans));
-        }
+    fn finalize(self) -> RenderedMarkdown {
+        let (lines, headings) = self.lines.finalize();
         RenderedMarkdown {
-            lines: self.lines,
-            headings: self.heading_overlays,
+            lines,
+            headings,
             code_blocks: self.code_blocks,
             rules: self.rule_lines,
         }
