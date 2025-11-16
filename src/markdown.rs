@@ -681,7 +681,7 @@ impl MarkdownBuffer {
     fn insert_prefixes(&mut self) {
         if self.code_block.is_active() {
             self.lines
-                .push_span(Span::styled("    ", Self::code_block_style()), false);
+                .push_span(Span::styled(" ", Self::code_block_style()), false);
         }
         if self.blockquote_depth > 0 {
             for level in 0..self.blockquote_depth {

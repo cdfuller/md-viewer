@@ -5,9 +5,10 @@ use std::{
 
 use crate::markdown::{
     heading_block_colors, line_row_span, markdown_to_render_with_options, CodeBlockOverlay,
-    HeadingOverlay, MarkdownOptions, RenderedMarkdown, CODE_BLOCK_BG,
+    HeadingOverlay, MarkdownOptions, RenderedMarkdown, CODE_BLOCK_BG, CODE_BLOCK_BORDER_FG,
 };
 use ratatui::{
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -307,22 +308,22 @@ impl App {
                 continue;
             }
             let offset_rows = draw_start.saturating_sub(visible_start_row);
-            let mut area_y = inner.y + offset_rows as u16;
-            let mut area_height = (height_rows + 2) as u16;
-            let has_content_above =
-                block.line_start > 0 && !self.content[block.line_start - 1].spans.is_empty();
-            if area_y > inner.y && has_content_above {
-                area_y = area_y.saturating_sub(1);
-                area_height = area_height.saturating_add(1);
-            }
             let inner_bottom = inner.y + inner.height;
+            let border_top = if draw_start > visible_start_row {
+                inner.y + (offset_rows - 1) as u16
+            } else {
+                inner.y
+            };
+            let content_top = inner.y + offset_rows as u16;
+            let content_bottom = content_top + height_rows as u16;
+            let border_bottom = if draw_end < visible_end_row {
+                content_bottom + 1
+            } else {
+                content_bottom
+            };
+            let area_y = border_top;
+            let area_height = border_bottom.saturating_sub(border_top).max(3);
             if area_y + area_height > inner_bottom {
-                area_height = inner_bottom.saturating_sub(area_y);
-            }
-            if area_height < 3 {
-                area_height = area_height.max(3).min(inner_bottom.saturating_sub(inner.y));
-            }
-            if area_height == 0 {
                 continue;
             }
             let area = Rect {
@@ -331,18 +332,68 @@ impl App {
                 width: inner.width,
                 height: area_height,
             };
-            let block_lines = self.content[block.line_start..end_line].to_vec();
-            let block_scroll = (draw_start - block_row_start).min(u16::MAX as usize) as u16;
-            let widget = Paragraph::new(block_lines)
-                .wrap(Wrap { trim: false })
-                .scroll((block_scroll, 0))
-                .block(
-                    Block::default()
-                        .title(block.language.as_deref().unwrap_or("code"))
-                        .borders(Borders::ALL)
-                        .style(Style::default().bg(CODE_BLOCK_BG)),
-                );
-            frame.render_widget(widget, area);
+            Self::draw_code_block_border(frame.buffer_mut(), area, block.language.as_deref());
+            Self::fill_code_block_background(frame.buffer_mut(), area, inner);
+        }
+    }
+
+    fn draw_code_block_border(buf: &mut Buffer, area: Rect, title: Option<&str>) {
+        if area.width < 3 || area.height < 3 {
+            return;
+        }
+        let left = area.x;
+        let right = area.x + area.width.saturating_sub(1);
+        let top = area.y;
+        let bottom = area.y + area.height.saturating_sub(1);
+        let border_style = Style::default().fg(CODE_BLOCK_BORDER_FG).bg(CODE_BLOCK_BG);
+        buf.get_mut(left, top)
+            .set_symbol("┌")
+            .set_style(border_style);
+        buf.get_mut(right, top)
+            .set_symbol("┐")
+            .set_style(border_style);
+        buf.get_mut(left, bottom)
+            .set_symbol("└")
+            .set_style(border_style);
+        buf.get_mut(right, bottom)
+            .set_symbol("┘")
+            .set_style(border_style);
+        for x in left + 1..right {
+            buf.get_mut(x, top).set_symbol("─").set_style(border_style);
+            buf.get_mut(x, bottom)
+                .set_symbol("─")
+                .set_style(border_style);
+        }
+        for y in top + 1..bottom {
+            buf.get_mut(left, y).set_symbol("│").set_style(border_style);
+            buf.get_mut(right, y)
+                .set_symbol("│")
+                .set_style(border_style);
+        }
+        if let Some(text) = title {
+            let label = format!(" {} ", text);
+            for (ch, x) in label.chars().zip((left + 1)..right) {
+                let symbol = ch.to_string();
+                buf.get_mut(x, top)
+                    .set_symbol(&symbol)
+                    .set_style(border_style);
+            }
+        }
+    }
+
+    fn fill_code_block_background(buf: &mut Buffer, area: Rect, inner: Rect) {
+        if area.height <= 2 {
+            return;
+        }
+        let inner_style = Style::default().bg(CODE_BLOCK_BG);
+        let start_y = area.y.saturating_add(1);
+        let end_y = area.y + area.height.saturating_sub(1);
+        let start_x = inner.x;
+        let end_x = inner.x + inner.width;
+        for y in start_y..end_y {
+            for x in start_x..end_x {
+                buf.get_mut(x, y).set_style(inner_style);
+            }
         }
     }
 
