@@ -534,7 +534,8 @@ impl MarkdownBuffer {
                 state.index += 1;
                 label
             } else {
-                format!("{}- ", padding)
+                let symbol = unordered_bullet(self.list_stack.len() - 1);
+                format!("{}{} ", padding, symbol)
             };
             self.lines.push_span(
                 Span::styled(bullet, Style::default().fg(Color::Gray)),
@@ -771,6 +772,11 @@ impl MarkdownBuffer {
     fn code_block_style() -> Style {
         Style::default().fg(CODE_BLOCK_FG).bg(CODE_BLOCK_BG)
     }
+}
+
+fn unordered_bullet(depth: usize) -> &'static str {
+    const BULLETS: [&str; 4] = ["●", "○", "■", "□"];
+    BULLETS[depth % BULLETS.len()]
 }
 
 struct TableBuilder {
@@ -1348,6 +1354,26 @@ mod tests {
             .join("\n");
         assert!(text.contains("1. first"));
         assert!(text.contains("2. second"));
+    }
+
+    #[test]
+    fn unordered_lists_render_nested_bullets() {
+        let markdown = "- top\n  - child\n    - grandchild";
+        let render = markdown_to_render(markdown);
+        let text: String = render
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("● top"));
+        assert!(text.contains("  ○ child"));
+        assert!(text.contains("    ■ grandchild"));
     }
 
     #[test]
