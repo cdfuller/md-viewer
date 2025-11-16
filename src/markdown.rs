@@ -12,6 +12,12 @@ pub const CODE_BLOCK_FG: Color = Color::Rgb(225, 228, 235);
 pub const CODE_BLOCK_BG: Color = Color::Rgb(12, 16, 26);
 pub const CODE_BLOCK_BORDER_FG: Color = Color::Rgb(150, 160, 175);
 const MIN_COLUMN_WIDTH: usize = 3;
+const BLOCKQUOTE_COLORS: [Color; 4] = [
+    Color::Rgb(255, 200, 150),
+    Color::Rgb(230, 170, 120),
+    Color::Rgb(200, 140, 110),
+    Color::Rgb(170, 120, 100),
+];
 
 #[derive(Clone, Copy)]
 pub struct MarkdownOptions {
@@ -677,15 +683,19 @@ impl MarkdownBuffer {
                 .push_span(Span::styled("    ", Self::code_block_style()), false);
         }
         if self.blockquote_depth > 0 {
-            let mut prefix = String::new();
-            for _ in 0..self.blockquote_depth {
-                prefix.push_str("> ");
+            for level in 0..self.blockquote_depth {
+                let marker = if level + 1 == self.blockquote_depth {
+                    "▌ "
+                } else {
+                    "│ "
+                };
+                let mut style = Style::default().fg(blockquote_color(level));
+                if self.code_block.is_active() {
+                    style = style.bg(CODE_BLOCK_BG);
+                }
+                self.lines
+                    .push_span(Span::styled(marker.to_string(), style), false);
             }
-            let mut style = Style::default().fg(Color::DarkGray);
-            if self.code_block.is_active() {
-                style = style.bg(CODE_BLOCK_BG);
-            }
-            self.lines.push_span(Span::styled(prefix, style), false);
         }
     }
 
@@ -777,6 +787,10 @@ impl MarkdownBuffer {
 fn unordered_bullet(depth: usize) -> &'static str {
     const BULLETS: [&str; 4] = ["●", "○", "■", "□"];
     BULLETS[depth % BULLETS.len()]
+}
+
+fn blockquote_color(depth: usize) -> Color {
+    BLOCKQUOTE_COLORS[depth % BLOCKQUOTE_COLORS.len()]
 }
 
 struct TableBuilder {
@@ -1384,6 +1398,24 @@ mod tests {
         let line_idx = render.rules[0];
         assert!(line_idx < render.lines.len());
         assert!(render.lines[line_idx].spans.is_empty());
+    }
+
+    #[test]
+    fn blockquotes_use_custom_prefixes() {
+        let markdown = "> outer\n>> inner";
+        let render = markdown_to_render(markdown);
+        let text: Vec<String> = render
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(text.iter().any(|line| line.contains("▌ outer")));
+        assert!(text.iter().any(|line| line.contains("│ ▌ inner")));
     }
 
     #[test]
