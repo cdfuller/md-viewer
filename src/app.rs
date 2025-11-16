@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
     Frame,
 };
 
@@ -86,7 +86,8 @@ impl App {
 
         let viewer_block = Block::default()
             .title(self.title_line())
-            .borders(Borders::ALL);
+            .borders(Borders::ALL)
+            .padding(Padding::horizontal(1));
 
         let viewport = layout[0];
         let inner = viewer_block.inner(viewport);
