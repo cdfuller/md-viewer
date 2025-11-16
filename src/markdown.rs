@@ -5,13 +5,36 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use textwrap::{wrap, Options as WrapOptions};
+use unicode_width::UnicodeWidthStr;
 
 pub const CODE_BLOCK_FG: Color = Color::Rgb(225, 228, 235);
 pub const CODE_BLOCK_BG: Color = Color::Rgb(12, 16, 26);
 pub const CODE_BLOCK_BORDER_FG: Color = Color::Rgb(150, 160, 175);
+const MIN_COLUMN_WIDTH: usize = 3;
+
+#[derive(Clone, Copy)]
+pub struct MarkdownOptions {
+    pub max_table_width: usize,
+}
+
+impl Default for MarkdownOptions {
+    fn default() -> Self {
+        Self {
+            max_table_width: 80,
+        }
+    }
+}
 
 pub fn markdown_to_render(markdown: &str) -> RenderedMarkdown {
-    let mut buffer = MarkdownBuffer::default();
+    markdown_to_render_with_options(markdown, MarkdownOptions::default())
+}
+
+pub fn markdown_to_render_with_options(
+    markdown: &str,
+    options: MarkdownOptions,
+) -> RenderedMarkdown {
+    let mut buffer = MarkdownBuffer::new(options);
     let parser = Parser::new_ext(
         markdown,
         Options::ENABLE_STRIKETHROUGH
@@ -219,10 +242,11 @@ struct MarkdownBuffer {
     code_blocks: Vec<CodeBlockOverlay>,
     rule_lines: Vec<usize>,
     code_block: CodeBlockState,
+    options: MarkdownOptions,
 }
 
-impl Default for MarkdownBuffer {
-    fn default() -> Self {
+impl MarkdownBuffer {
+    fn new(options: MarkdownOptions) -> Self {
         Self {
             lines: LineWriter::default(),
             style_stack: vec![Style::default()],
@@ -232,6 +256,7 @@ impl Default for MarkdownBuffer {
             code_blocks: Vec::new(),
             rule_lines: Vec::new(),
             code_block: CodeBlockState::default(),
+            options,
         }
     }
 }
@@ -269,7 +294,7 @@ impl MarkdownBuffer {
                 self.push_code_span(code)
             }
             MdEvent::Html(html) => {
-                if self.push_table_text(&html) {
+                if self.push_table_html(&html) {
                     return;
                 }
                 self.push_text(html)
@@ -310,7 +335,7 @@ impl MarkdownBuffer {
             Tag::Table(alignments) => {
                 self.ensure_block_gap();
                 self.flush_line(false);
-                self.table = Some(TableBuilder::new(alignments));
+                self.table = Some(TableBuilder::new(alignments, self.options.max_table_width));
                 return;
             }
             Tag::TableHead => {
@@ -605,6 +630,16 @@ impl MarkdownBuffer {
         false
     }
 
+    fn push_table_html(&mut self, html: &CowStr<'_>) -> bool {
+        if let Some(table) = self.table.as_mut() {
+            if table.is_collecting() {
+                table.push_html(html);
+                return true;
+            }
+        }
+        false
+    }
+
     fn push_table_code(&mut self, text: &CowStr<'_>) -> bool {
         if let Some(table) = self.table.as_mut() {
             if table.is_collecting() {
@@ -740,16 +775,17 @@ impl MarkdownBuffer {
 
 struct TableBuilder {
     alignments: Vec<Alignment>,
-    header: Option<Vec<String>>,
-    rows: Vec<Vec<String>>,
-    current_row: Vec<String>,
+    header: Option<Vec<Cell>>,
+    rows: Vec<Vec<Cell>>,
+    current_row: Vec<Cell>,
     current_cell: String,
     in_head: bool,
     in_cell: bool,
+    max_width: usize,
 }
 
 impl TableBuilder {
-    fn new(alignments: Vec<Alignment>) -> Self {
+    fn new(alignments: Vec<Alignment>, max_width: usize) -> Self {
         Self {
             alignments,
             header: None,
@@ -758,14 +794,25 @@ impl TableBuilder {
             current_cell: String::new(),
             in_head: false,
             in_cell: false,
+            max_width,
         }
     }
 
     fn start_head(&mut self) {
+        if self.in_cell {
+            self.end_cell();
+        }
+        self.current_row.clear();
         self.in_head = true;
     }
 
     fn end_head(&mut self) {
+        if self.in_cell {
+            self.end_cell();
+        }
+        if self.in_head {
+            self.commit_header_row();
+        }
         self.in_head = false;
     }
 
@@ -780,12 +827,12 @@ impl TableBuilder {
         if self.current_row.is_empty() {
             return;
         }
-        if self.in_head && self.header.is_none() {
-            self.header = Some(self.current_row.clone());
+        if self.in_head {
+            self.commit_header_row();
         } else {
             self.rows.push(self.current_row.clone());
+            self.current_row.clear();
         }
-        self.current_row.clear();
     }
 
     fn start_cell(&mut self) {
@@ -800,10 +847,20 @@ impl TableBuilder {
         if !self.in_cell {
             return;
         }
-        let text = self.current_cell.trim().to_string();
-        self.current_row.push(text);
-        self.current_cell.clear();
+        let raw = mem::take(&mut self.current_cell);
+        let cell = Cell::from_raw(raw);
+        self.current_row.push(cell);
         self.in_cell = false;
+    }
+
+    fn commit_header_row(&mut self) {
+        if self.current_row.is_empty() {
+            return;
+        }
+        if self.header.is_none() {
+            self.header = Some(self.current_row.clone());
+        }
+        self.current_row.clear();
     }
 
     fn push_text(&mut self, text: &CowStr<'_>) {
@@ -835,7 +892,18 @@ impl TableBuilder {
         if !self.in_cell {
             return;
         }
-        self.current_cell.push(' ');
+        self.current_cell.push('\n');
+    }
+
+    fn push_html(&mut self, html: &CowStr<'_>) {
+        if !self.in_cell {
+            return;
+        }
+        if is_html_break(html.as_ref()) {
+            self.current_cell.push('\n');
+        } else {
+            self.current_cell.push_str(html.as_ref());
+        }
     }
 
     fn is_collecting(&self) -> bool {
@@ -872,44 +940,106 @@ impl TableBuilder {
         for row in &self.rows {
             update_widths(&mut widths, row);
         }
+        clamp_column_widths(&mut widths, self.max_width);
 
         let mut lines = Vec::new();
-        lines.push(Line::from(table_separator(&widths)));
+        lines.push(Line::from(unicode_border('┌', '┬', '┐', &widths)));
         if let Some(header) = &self.header {
-            lines.push(Line::from(build_row(header, &widths, &self.alignments)));
-            lines.push(Line::from(table_separator(&widths)));
+            for row_line in build_row_lines(header, &widths, &self.alignments) {
+                lines.push(Line::from(row_line));
+            }
+            lines.push(Line::from(unicode_border('├', '┼', '┤', &widths)));
         }
-        for row in &self.rows {
-            lines.push(Line::from(build_row(row, &widths, &self.alignments)));
+        for (idx, row) in self.rows.iter().enumerate() {
+            for row_line in build_row_lines(row, &widths, &self.alignments) {
+                lines.push(Line::from(row_line));
+            }
+            if idx + 1 < self.rows.len() {
+                lines.push(Line::from(unicode_border('├', '┼', '┤', &widths)));
+            }
         }
-        lines.push(Line::from(table_separator(&widths)));
+        lines.push(Line::from(unicode_border('└', '┴', '┘', &widths)));
         lines
     }
 }
 
-fn update_widths(widths: &mut [usize], row: &[String]) {
+#[derive(Clone)]
+struct Cell {
+    lines: Vec<String>,
+}
+
+impl Cell {
+    fn from_raw(raw: String) -> Self {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Self {
+                lines: vec![String::new()],
+            };
+        }
+        let mut lines: Vec<String> = trimmed
+            .split('\n')
+            .map(|segment| segment.trim().to_string())
+            .collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        Self { lines }
+    }
+
+    fn width(&self) -> usize {
+        self.lines
+            .iter()
+            .map(|line| display_width(line))
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+fn update_widths(widths: &mut [usize], row: &[Cell]) {
     for (idx, cell) in row.iter().enumerate() {
         if idx < widths.len() {
-            widths[idx] = widths[idx].max(display_width(cell));
+            widths[idx] = widths[idx].max(cell.width());
         }
     }
 }
 
 fn display_width(value: &str) -> usize {
-    value.chars().count().max(1)
+    let width = UnicodeWidthStr::width(value);
+    width.max(1)
 }
 
-fn build_row(row: &[String], widths: &[usize], alignments: &[Alignment]) -> String {
-    let mut line = String::new();
-    line.push('|');
-    for (idx, width) in widths.iter().enumerate() {
-        let cell = row.get(idx).map(|s| s.as_str()).unwrap_or("");
-        line.push(' ');
-        line.push_str(&pad_cell(cell, *width, alignments[idx]));
-        line.push(' ');
-        line.push('|');
+fn build_row_lines(row: &[Cell], widths: &[usize], alignments: &[Alignment]) -> Vec<String> {
+    if widths.is_empty() {
+        return Vec::new();
     }
-    line
+    let mut column_lines: Vec<Vec<String>> = widths
+        .iter()
+        .enumerate()
+        .map(|(idx, width)| render_cell_lines(row.get(idx), *width, alignments[idx]))
+        .collect();
+    let height = column_lines
+        .iter()
+        .map(|lines| lines.len())
+        .max()
+        .unwrap_or(1);
+    for (col_idx, lines) in column_lines.iter_mut().enumerate() {
+        while lines.len() < height {
+            lines.push(pad_cell("", widths[col_idx], alignments[col_idx]));
+        }
+    }
+    let mut rows = Vec::with_capacity(height);
+    for line_idx in 0..height {
+        let mut line = String::new();
+        line.push('│');
+        for col_idx in 0..widths.len() {
+            line.push(' ');
+            line.push_str(&column_lines[col_idx][line_idx]);
+            line.push(' ');
+            line.push('│');
+        }
+        rows.push(line);
+    }
+    rows
 }
 
 fn pad_cell(text: &str, width: usize, alignment: Alignment) -> String {
@@ -917,36 +1047,136 @@ fn pad_cell(text: &str, width: usize, alignment: Alignment) -> String {
     if trimmed.is_empty() {
         return " ".repeat(width);
     }
+    let display = UnicodeWidthStr::width(trimmed);
+    if display >= width {
+        return trimmed.to_string();
+    }
+    let padding = width - display;
     match alignment {
-        Alignment::Right => format!("{:>width$}", trimmed),
+        Alignment::Right => format!("{}{}", " ".repeat(padding), trimmed),
         Alignment::Center => {
-            let len = trimmed.chars().count();
-            if len >= width {
-                trimmed.to_string()
-            } else {
-                let padding = width - len;
-                let left = padding / 2;
-                let right = padding - left;
-                format!("{}{}{}", " ".repeat(left), trimmed, " ".repeat(right))
-            }
+            let left = padding / 2;
+            let right = padding - left;
+            format!("{}{}{}", " ".repeat(left), trimmed, " ".repeat(right))
         }
-        _ => format!("{: <width$}", trimmed),
+        _ => format!("{}{}", trimmed, " ".repeat(padding)),
     }
 }
 
-fn table_separator(widths: &[usize]) -> String {
+fn unicode_border(left: char, junction: char, right: char, widths: &[usize]) -> String {
     let mut line = String::new();
-    line.push('+');
-    for width in widths {
-        line.push_str(&"-".repeat(width + 2));
-        line.push('+');
+    line.push(left);
+    for (idx, width) in widths.iter().enumerate() {
+        line.push_str(&"─".repeat(width + 2));
+        if idx + 1 == widths.len() {
+            line.push(right);
+        } else {
+            line.push(junction);
+        }
     }
     line
+}
+
+fn is_html_break(value: &str) -> bool {
+    let lowered = value.trim().to_ascii_lowercase();
+    matches!(lowered.as_str(), "<br>" | "<br/>" | "<br />")
+}
+
+fn clamp_column_widths(widths: &mut [usize], max_width: usize) {
+    if widths.is_empty() {
+        return;
+    }
+    let border_space = 3 * widths.len() + 1;
+    if border_space >= max_width {
+        widths.fill(MIN_COLUMN_WIDTH);
+        return;
+    }
+    let max_content = max_width.saturating_sub(border_space);
+    let min_total = MIN_COLUMN_WIDTH * widths.len();
+    if max_content <= min_total {
+        widths.fill(MIN_COLUMN_WIDTH);
+        return;
+    }
+    let total: usize = widths.iter().sum();
+    if total <= max_content {
+        return;
+    }
+    let scale = max_content as f64 / total as f64;
+    for width in widths.iter_mut() {
+        let scaled = (*width as f64 * scale).floor() as usize;
+        *width = scaled.max(MIN_COLUMN_WIDTH);
+    }
+    adjust_widths(widths, max_content);
+}
+
+fn adjust_widths(widths: &mut [usize], target: usize) {
+    if widths.is_empty() {
+        return;
+    }
+    let mut total: isize = widths.iter().sum::<usize>() as isize;
+    let target = target as isize;
+    if total > target {
+        while total > target {
+            if let Some((idx, _)) = widths
+                .iter()
+                .enumerate()
+                .filter(|(_, &w)| w > MIN_COLUMN_WIDTH)
+                .max_by_key(|(_, &w)| w)
+            {
+                widths[idx] -= 1;
+                total -= 1;
+            } else {
+                break;
+            }
+        }
+    } else if total < target {
+        let mut idx = 0usize;
+        while total < target {
+            widths[idx % widths.len()] += 1;
+            total += 1;
+            idx += 1;
+        }
+    }
+}
+
+fn render_cell_lines(cell: Option<&Cell>, width: usize, alignment: Alignment) -> Vec<String> {
+    let mut rendered = Vec::new();
+    if let Some(cell) = cell {
+        for raw_line in &cell.lines {
+            let wrapped = wrap_cell_text(raw_line, width);
+            if wrapped.is_empty() {
+                rendered.push(pad_cell("", width, alignment));
+            } else {
+                for segment in wrapped {
+                    rendered.push(pad_cell(&segment, width, alignment));
+                }
+            }
+        }
+    }
+    if rendered.is_empty() {
+        rendered.push(pad_cell("", width, alignment));
+    }
+    rendered
+}
+
+fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return vec![String::new()];
+    }
+    wrap(trimmed, WrapOptions::new(width).break_words(true))
+        .into_iter()
+        .map(|segment| segment.into_owned())
+        .collect::<Vec<_>>()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn heading_overlays_record_line_numbers() {
@@ -965,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn table_builder_outputs_ascii_rows() {
+    fn table_builder_outputs_unicode_rows() {
         let markdown = "| A | B |\n|---|---|\n| x | y |";
         let render = markdown_to_render(markdown);
         let joined: String = render
@@ -979,8 +1209,99 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("+"));
-        assert!(joined.contains("| x"));
+        assert!(joined.contains("┌"));
+        assert!(joined.contains("│ x"));
+    }
+
+    #[test]
+    fn table_headers_are_rendered() {
+        let markdown = "| Name | Age |\n| --- | --- |\n| Bob | 3 |";
+        let render = markdown_to_render(markdown);
+        let joined: String = render
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Name"));
+        assert!(joined.contains("Age"));
+    }
+
+    #[test]
+    fn table_cells_render_multiline_content() {
+        let markdown = "| A |\n| --- |\n| line1<br>line2 |";
+        let render = markdown_to_render(markdown);
+        let joined = render
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines: Vec<_> = joined.lines().collect();
+        let line1_idx = lines.iter().position(|line| line.contains("line1"));
+        let line2_idx = lines.iter().position(|line| line.contains("line2"));
+        assert!(line1_idx.is_some());
+        assert!(line2_idx.is_some());
+        assert_ne!(line1_idx.unwrap(), line2_idx.unwrap());
+    }
+
+    #[test]
+    fn table_handles_wide_characters() {
+        let markdown = "| Emoji | Word |\n| --- | --- |\n| 😀 | text |";
+        let render = markdown_to_render(markdown);
+        let joined: Vec<String> = render
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let border = joined
+            .iter()
+            .find(|line| line.starts_with('┌'))
+            .expect("table border present");
+        let emoji_line = joined
+            .iter()
+            .find(|line| line.contains('😀'))
+            .expect("emoji row present");
+        assert_eq!(
+            UnicodeWidthStr::width(border.as_str()),
+            UnicodeWidthStr::width(emoji_line.as_str())
+        );
+    }
+
+    #[test]
+    fn wide_tables_wrap_cells() {
+        let markdown = "| A | B | C | D | E | F |\n| --- | --- | --- | --- | --- | --- |\n| superlongwordwithoutbreaksandmoresuperlongwordwithoutbreaksandmoresuperlongwordwithoutbreaksandmore | content | content | content | content | content |";
+        let render = markdown_to_render(markdown);
+        let joined: Vec<String> = render
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let total_row_lines = joined.iter().filter(|line| line.starts_with('│')).count();
+        assert!(
+            total_row_lines >= 3,
+            "header plus wrapped row should yield multiple row lines"
+        );
     }
 
     #[test]

@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::markdown::{
-    heading_block_colors, line_row_span, markdown_to_render, CodeBlockOverlay, HeadingOverlay,
-    RenderedMarkdown, CODE_BLOCK_BG,
+    heading_block_colors, line_row_span, markdown_to_render_with_options, CodeBlockOverlay,
+    HeadingOverlay, MarkdownOptions, RenderedMarkdown, CODE_BLOCK_BG,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -17,10 +17,12 @@ use ratatui::{
 
 pub struct App {
     path: PathBuf,
+    source: String,
     content: Vec<Line<'static>>,
     headings: Vec<HeadingOverlay>,
     code_blocks: Vec<CodeBlockOverlay>,
     rules: Vec<usize>,
+    table_width: usize,
     scroll: usize,
     viewport_height: u16,
     viewport_width: u16,
@@ -31,17 +33,30 @@ pub struct App {
 impl App {
     pub fn load(path: &Path) -> io::Result<Self> {
         let markdown = fs::read_to_string(path)?;
-        let render = markdown_to_render(&markdown);
-        Ok(Self::new(path.to_path_buf(), render))
+        let options = MarkdownOptions::default();
+        let render = markdown_to_render_with_options(&markdown, options);
+        Ok(Self::new(
+            path.to_path_buf(),
+            markdown,
+            render,
+            options.max_table_width,
+        ))
     }
 
-    pub fn new(path: PathBuf, render: RenderedMarkdown) -> Self {
+    pub fn new(
+        path: PathBuf,
+        source: String,
+        render: RenderedMarkdown,
+        table_width: usize,
+    ) -> Self {
         Self {
             path,
+            source,
             headings: render.headings,
             code_blocks: render.code_blocks,
             rules: render.rules,
             content: ensure_non_empty(render.lines),
+            table_width,
             scroll: 0,
             viewport_height: 0,
             viewport_width: 80,
@@ -52,11 +67,13 @@ impl App {
 
     pub fn reload(&mut self) -> io::Result<()> {
         let markdown = fs::read_to_string(&self.path)?;
-        let render = markdown_to_render(&markdown);
-        self.content = ensure_non_empty(render.lines);
-        self.headings = render.headings;
-        self.code_blocks = render.code_blocks;
-        self.rules = render.rules;
+        let width = self.table_width.max(1);
+        let options = MarkdownOptions {
+            max_table_width: width,
+        };
+        let render = markdown_to_render_with_options(&markdown, options);
+        self.source = markdown;
+        self.apply_render(render);
         self.scroll = 0;
         Ok(())
     }
@@ -74,7 +91,9 @@ impl App {
         let viewport = layout[0];
         let inner = viewer_block.inner(viewport);
         self.viewport_height = inner.height.max(1);
-        self.viewport_width = inner.width.max(1);
+        let width = inner.width.max(1) as usize;
+        self.ensure_table_width(width);
+        self.viewport_width = width as u16;
         let metrics = self.compute_line_metrics(self.viewport_width.max(1) as usize);
 
         let paragraph = Paragraph::new(self.content.clone())
@@ -159,6 +178,27 @@ impl App {
             offsets.push(total);
         }
         LineMetrics { offsets }
+    }
+
+    fn ensure_table_width(&mut self, width: usize) {
+        let width = width.max(1);
+        if width == self.table_width {
+            return;
+        }
+        let options = MarkdownOptions {
+            max_table_width: width,
+        };
+        let render = markdown_to_render_with_options(&self.source, options);
+        self.apply_render(render);
+        self.table_width = width;
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
+    fn apply_render(&mut self, render: RenderedMarkdown) {
+        self.content = ensure_non_empty(render.lines);
+        self.headings = render.headings;
+        self.code_blocks = render.code_blocks;
+        self.rules = render.rules;
     }
 
     fn highlight_headings(&self, frame: &mut Frame<'_>, inner: Rect, metrics: &LineMetrics) {

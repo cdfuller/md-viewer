@@ -17,7 +17,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use markdown::{
-    heading_block_colors, markdown_to_render, CodeBlockOverlay, CODE_BLOCK_BG, CODE_BLOCK_BORDER_FG,
+    heading_block_colors, markdown_to_render_with_options, CodeBlockOverlay, MarkdownOptions,
+    CODE_BLOCK_BG, CODE_BLOCK_BORDER_FG,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -140,16 +141,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> io::Result<bool> {
 
 fn dump_file(path: &Path) -> io::Result<()> {
     let markdown = fs::read_to_string(path)?;
-    let render = markdown_to_render(&markdown);
+    let term_width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80)
+        .max(1);
+    let options = MarkdownOptions {
+        max_table_width: term_width,
+    };
+    let render = markdown_to_render_with_options(&markdown, options);
     let mut heading_bg = HashMap::new();
     for heading in &render.headings {
         let (bg, _) = heading_block_colors(heading.level);
         heading_bg.insert(heading.line, bg);
     }
     let rule_lines: HashSet<usize> = render.rules.iter().copied().collect();
-    let term_width = crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80);
     let mut out = io::BufWriter::new(io::stdout());
     let mut idx = 0usize;
     let mut code_iter = render.code_blocks.iter().peekable();
