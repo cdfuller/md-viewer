@@ -239,56 +239,6 @@ impl App {
         }
     }
 
-    fn render_code_blocks(&self, frame: &mut Frame<'_>, inner: Rect, metrics: &LineMetrics) {
-        if inner.height == 0 || inner.width == 0 {
-            return;
-        }
-        let visible_start_row = self.scroll;
-        let visible_end_row = visible_start_row + inner.height as usize;
-        for block in &self.code_blocks {
-            if block.line_start >= self.content.len() {
-                continue;
-            }
-            let end_line = block.line_end.min(self.content.len());
-            let Some((block_row_start, block_row_end)) =
-                metrics.line_range(block.line_start, end_line)
-            else {
-                continue;
-            };
-            if block_row_end <= block_row_start {
-                continue;
-            }
-            if block_row_end <= visible_start_row || block_row_start >= visible_end_row {
-                continue;
-            }
-            let draw_start = block_row_start.max(visible_start_row);
-            let draw_end = block_row_end.min(visible_end_row);
-            let height_rows = draw_end.saturating_sub(draw_start);
-            if height_rows == 0 {
-                continue;
-            }
-            let area_y = inner.y + (draw_start - visible_start_row) as u16;
-            let area = Rect {
-                x: inner.x,
-                y: area_y,
-                width: inner.width,
-                height: height_rows as u16,
-            };
-            let block_lines = self.content[block.line_start..end_line].to_vec();
-            let block_scroll = (draw_start - block_row_start).min(u16::MAX as usize) as u16;
-            let widget = Paragraph::new(block_lines)
-                .wrap(Wrap { trim: false })
-                .scroll((block_scroll, 0))
-                .block(
-                    Block::default()
-                        .title(block.language.as_deref().unwrap_or("code"))
-                        .borders(Borders::ALL)
-                        .style(Style::default().bg(CODE_BLOCK_BG)),
-                );
-            frame.render_widget(widget, area);
-        }
-    }
-
     fn render_rules(&self, frame: &mut Frame<'_>, inner: Rect, metrics: &LineMetrics) {
         if inner.height == 0 || inner.width == 0 {
             return;
@@ -325,6 +275,74 @@ impl App {
                     cell.set_style(style);
                 }
             }
+        }
+    }
+
+    fn render_code_blocks(&self, frame: &mut Frame<'_>, inner: Rect, metrics: &LineMetrics) {
+        if inner.height == 0 || inner.width == 0 {
+            return;
+        }
+        let visible_start_row = self.scroll;
+        let visible_end_row = visible_start_row + inner.height as usize;
+        for block in &self.code_blocks {
+            if block.line_start >= self.content.len() {
+                continue;
+            }
+            let end_line = block.line_end.min(self.content.len());
+            let Some((block_row_start, block_row_end)) =
+                metrics.line_range(block.line_start, end_line)
+            else {
+                continue;
+            };
+            if block_row_end <= block_row_start {
+                continue;
+            }
+            if block_row_end <= visible_start_row || block_row_start >= visible_end_row {
+                continue;
+            }
+            let draw_start = block_row_start.max(visible_start_row);
+            let draw_end = block_row_end.min(visible_end_row);
+            let height_rows = draw_end.saturating_sub(draw_start);
+            if height_rows == 0 {
+                continue;
+            }
+            let offset_rows = draw_start.saturating_sub(visible_start_row);
+            let mut area_y = inner.y + offset_rows as u16;
+            let mut area_height = (height_rows + 2) as u16;
+            let has_content_above =
+                block.line_start > 0 && !self.content[block.line_start - 1].spans.is_empty();
+            if area_y > inner.y && has_content_above {
+                area_y = area_y.saturating_sub(1);
+                area_height = area_height.saturating_add(1);
+            }
+            let inner_bottom = inner.y + inner.height;
+            if area_y + area_height > inner_bottom {
+                area_height = inner_bottom.saturating_sub(area_y);
+            }
+            if area_height < 3 {
+                area_height = area_height.max(3).min(inner_bottom.saturating_sub(inner.y));
+            }
+            if area_height == 0 {
+                continue;
+            }
+            let area = Rect {
+                x: inner.x,
+                y: area_y,
+                width: inner.width,
+                height: area_height,
+            };
+            let block_lines = self.content[block.line_start..end_line].to_vec();
+            let block_scroll = (draw_start - block_row_start).min(u16::MAX as usize) as u16;
+            let widget = Paragraph::new(block_lines)
+                .wrap(Wrap { trim: false })
+                .scroll((block_scroll, 0))
+                .block(
+                    Block::default()
+                        .title(block.language.as_deref().unwrap_or("code"))
+                        .borders(Borders::ALL)
+                        .style(Style::default().bg(CODE_BLOCK_BG)),
+                );
+            frame.render_widget(widget, area);
         }
     }
 

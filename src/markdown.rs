@@ -502,6 +502,7 @@ impl MarkdownBuffer {
                 self.finish_code_block();
                 self.pop_style();
                 self.push_blank_line();
+                self.force_blank_line();
             }
             Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link(_, _, _) => {
                 self.pop_style();
@@ -736,6 +737,10 @@ impl MarkdownBuffer {
 
     fn push_blank_line(&mut self) {
         self.lines.push_blank_line();
+    }
+
+    fn force_blank_line(&mut self) {
+        self.lines.push_manual_line(Line::default());
     }
 
     fn push_rule(&mut self) {
@@ -1451,6 +1456,19 @@ mod tests {
         for span in &code_line.spans {
             assert_eq!(span.style.bg, Some(CODE_BLOCK_BG));
         }
+    }
+
+    #[test]
+    fn code_block_background_stops_after_block() {
+        let markdown = "```bash\ncmd\n```\nnext";
+        let render = markdown_to_render(markdown);
+        let block = render.code_blocks.first().expect("code block recorded");
+        assert!(block.line_end < render.lines.len());
+        let after = &render.lines[block.line_end];
+        assert!(after
+            .spans
+            .iter()
+            .all(|span| span.style.bg != Some(CODE_BLOCK_BG)));
     }
 
     #[test]
